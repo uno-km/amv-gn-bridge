@@ -1,0 +1,17 @@
+.env
+.env.*
+*.db
+*.sqlite*
+*.bak
+*.new
+*profile*/
+copilot_profile*/
+gemini_profile*/
+accounts.json
+account_state.json
+account_meta.json
+settings.json
+__pycache__/
+.pytest_cache/
+dist/
+build/

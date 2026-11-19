@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "amv-gn-bridge"
+dynamic = ["version"]
+description = "Multi-Account Zero-Leak REST/MCP Bridge & Account Manager for Google Gemini Web"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0 OR Commercial-License" }
+authors = [{ name = "Eunho Kim", email = "amv.foundation.kr@gmail.com" }]
+keywords = [
+  "amv-gn-bridge",
+  "gemini",
+  "gemini-web",
+  "mcp",
+  "llm-gateway",
+  "image-generation",
+  "openai-compatible",
+  "multi-account",
+  "n8n",
+  "playwright"
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12"
+]
+dependencies = [
+  "playwright>=1.40.0",
+  "mcp>=1.0.0,<2",
+  "fastapi>=0.100.0",
+  "uvicorn>=0.22.0",
+  "customtkinter>=5.2.0",
+  "Pillow>=10.0.0",
+  "certifi>=2024.2.2"
+]
+
+[project.scripts]
+amv-gn-bridge = "amv_gn_bridge.cli:main"
+agb = "amv_gn_bridge.cli:main"
+gemini-bridge = "amv_gn_bridge.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "amv_gn_bridge._version.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["amv_gn_bridge*"]

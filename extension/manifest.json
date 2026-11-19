@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "amv-gn-bridge Sidecar",
+  "version": "0.1.0",
+  "description": "크롬·엣지·웨일 사이드바에서 멀티계정 Google Gemini 웹(텍스트·이미지 생성·한도 자동 순환)을 즉시 호출하는 AI 사이드바 확장 프로그램 (amv-gn-bridge)",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "amv-gn-bridge 사이드바 열기"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "sidePanel",
+    "contextMenus",
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:11501/*",
+    "http://localhost:11501/*"
+  ],
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+G",
+        "mac": "Command+Shift+G"
+      },
+      "description": "amv-gn-bridge 사이드바 토글"
+    }
+  }
+}

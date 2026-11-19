@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>amv-gn-bridge Sidecar</title>
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <div class="sidecar-container">
+    <header class="sidecar-header">
+      <div class="brand-group">
+        <span class="brand-bolt">✦</span>
+        <div class="brand-text">
+          <div class="brand-title">amv-gn-bridge</div>
+        </div>
+      </div>
+      <div class="header-actions">
+        <span class="status-conn" id="statusPill" title="게이트웨이 연결 상태">
+          <span class="status-dot"></span>
+        </span>
+        <button type="button" class="icon-btn" id="settingsBtn" title="게이트웨이 설정">⚙</button>
+        <button type="button" class="icon-btn" id="clearBtn" title="대화 내용 지우기">🗑</button>
+      </div>
+    </header>
+
+    <div class="settings-drawer" id="settingsDrawer" style="display: none;">
+      <div class="settings-row">
+        <label for="gatewayUrlInput">Gateway URL:</label>
+        <input type="text" id="gatewayUrlInput" value="http://127.0.0.1:11501/v1" placeholder="http://127.0.0.1:11501/v1">
+      </div>
+      <div class="settings-row">
+        <label for="modelSelect">모드:</label>
+        <select id="modelSelect">
+          <option value="gemini-web" selected>Gemini 채팅 (기본)</option>
+          <option value="gemini-web-thinking">Gemini Thinking (심층)</option>
+          <option value="gemini-web-image">Gemini 이미지 생성</option>
+        </select>
+      </div>
+      <div class="settings-actions">
+        <button type="button" class="btn-primary-sm" id="saveSettingsBtn">저장 및 닫기</button>
+        <button type="button" class="btn-secondary-sm" id="testGatewayBtn">연결 테스트</button>
+      </div>
+    </div>
+
+    <main class="chat-viewport" id="chatViewport">
+      <div class="welcome-card" id="welcomeCard">
+        <div class="welcome-icon">✦</div>
+        <h3>amv-gn-bridge</h3>
+        <p>멀티계정 Google Gemini(자동 한도 순환)에게 바로 질문하거나 이미지를 생성하세요.</p>
+      </div>
+    </main>
+
+    <footer class="sidecar-footer">
+      <form class="input-form" id="chatForm">
+        <textarea
+          id="promptInput"
+          placeholder="Gemini에게 질문하거나 이미지 프롬프트를 입력하세요... (Enter 전송, Shift+Enter 줄바꿈)"
+          rows="1"
+          required
+        ></textarea>
+        <button type="submit" class="send-btn" id="sendBtn" title="전송 (Enter)">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+          </svg>
+        </button>
+      </form>
+      <div class="footer-meta">
+        <span>모드: <strong id="currentModelLabel">gemini-web</strong></span>
+        <span id="poolBadge" style="margin-left:8px;opacity:0.8;"></span>
+      </div>
+    </footer>
+  </div>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>
