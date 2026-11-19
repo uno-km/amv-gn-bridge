@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2
+
+### Fixed
+- **True Concurrent Multi-Account Dispatch (`_pending_count` + `_queue_lock`)**: Implemented `_acquire_next_worker()` under `GeminiPool._queue_lock` and replaced the unused `_reserved` boolean with an integer `_pending_count` counter, ensuring simultaneous parallel requests spread across distinct idle accounts rather than piling onto the same worker.
+- **Fast Failover on Google `/sorry` Redirects**: Added `_is_sorry_url()` detection in `_prepare_page()` and `_wait_for_signed_in_composer(..., fail_fast_sorry=True)` so Google traffic-verification redirects immediately place the affected account in cooldown and fail over instead of polling for 45 seconds.
+
 ## 0.1.1
 
 ### Fixed

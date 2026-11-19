@@ -131,6 +131,11 @@ def _is_login_url(url: str) -> bool:
     return any(host in low for host in LOGIN_HOSTS)
 
 
+def _is_sorry_url(url: str) -> bool:
+    low = (url or "").lower()
+    return "google.com/sorry" in low
+
+
 class EventBus:
     """SSE 구독자 브로드캐스터 — asyncio.Queue 기반."""
 
@@ -452,7 +457,7 @@ class GeminiWorker:
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
         self._lock = asyncio.Lock()
-        self._reserved: bool = False
+        self._pending_count: int = 0
 
         self.login_state: str = _read_login_states().get(str(self.port), "unknown")
         _meta = _read_account_meta().get(str(self.port), {})
@@ -679,7 +684,7 @@ class GeminiWorker:
         return alive
 
     def is_busy(self) -> bool:
-        return self._lock.locked() or self._reserved
+        return self._lock.locked() or self._pending_count > 0
 
     async def ensure_running(self, visible: bool = False) -> bool:
         if self.is_alive():
@@ -916,7 +921,7 @@ class GeminiWorker:
             pass
 
     async def _is_signed_out_page(self, page: Page) -> bool:
-        if _is_login_url(page.url):
+        if _is_login_url(page.url) or _is_sorry_url(page.url):
             return True
         try:
             if await page.get_by_text("로그인", exact=True).count() > 0:
@@ -927,10 +932,14 @@ class GeminiWorker:
             pass
         return False
 
-    async def _wait_for_signed_in_composer(self, page: Page, timeout: float = COMPOSER_TIMEOUT_SEC) -> bool:
+    async def _wait_for_signed_in_composer(
+        self, page: Page, timeout: float = COMPOSER_TIMEOUT_SEC, *, fail_fast_sorry: bool = False
+    ) -> bool:
         deadline = time.time() + timeout
         textbox = page.locator(COMPOSER_SELECTOR).first
         while time.time() < deadline:
+            if fail_fast_sorry and _is_sorry_url(page.url):
+                return False
             if not await self._is_signed_out_page(page):
                 try:
                     if await textbox.is_visible():
@@ -1109,11 +1118,18 @@ class GeminiWorker:
             await page.goto(GEMINI_URL, wait_until="domcontentloaded", timeout=60000)
             await asyncio.sleep(2.2)
 
+        if _is_sorry_url(page.url):
+            self.mark_login_required("Google 트래픽 확인(/sorry) 감지")
+            raise GeminiLoginRequired(f"[{self.name}] Google 트래픽 확인(/sorry) 페이지가 감지되어 다음 계정으로 전환합니다.")
+
         if await self._is_signed_out_page(page):
             self.mark_login_required("Google 로그인 풀림")
             raise GeminiLoginRequired(f"[{self.name}] Google 로그인이 필요합니다. GUI/대시보드에서 [계정 연결]을 진행하십시오.")
 
-        if not await self._wait_for_signed_in_composer(page, timeout=COMPOSER_TIMEOUT_SEC):
+        if not await self._wait_for_signed_in_composer(page, timeout=COMPOSER_TIMEOUT_SEC, fail_fast_sorry=True):
+            if _is_sorry_url(page.url):
+                self.mark_login_required("Google 트래픽 확인(/sorry) 감지")
+                raise GeminiLoginRequired(f"[{self.name}] Google 트래픽 확인(/sorry) 페이지가 감지되어 다음 계정으로 전환합니다.")
             self.mark_login_required("Gemini 입력창 미감지")
             raise GeminiLoginRequired(f"[{self.name}] Gemini 입력창을 찾지 못했습니다. (URL: {page.url[:120]})")
         return page
@@ -1144,6 +1160,8 @@ class GeminiWorker:
     ) -> AsyncGenerator[str, None]:
         """Gemini 웹 텍스트 질의 및 실시간 스트리밍 delta 출력."""
         async with self._lock:
+            if self.is_cooling_down():
+                raise GeminiQuotaError(f"[{self.name}] 쿨다운 상태입니다.")
             self._cancel_standby()
             self.last_text = ""
             await self._respect_min_gap()
@@ -1245,6 +1263,8 @@ class GeminiWorker:
                 pass
 
         async with self._lock:
+            if self.is_cooling_down():
+                raise GeminiQuotaError(f"[{self.name}] 쿨다운 상태입니다.")
             self._cancel_standby()
             self.last_text = ""
             await self._respect_min_gap()
@@ -1627,12 +1647,29 @@ class GeminiPool:
             earliest = min(cooling, key=lambda x: x.cooldown_until) if cooling else None
             return [], earliest
 
-        # 라운드 로빈 회전 후, 현재 이미 살아있고 한도 여유 있는 워커를 1순위로 유지(불필요한 브라우저 재기동 최소화)
+        # 라운드 로빈 회전 후 최소 부하(유휴 최우선) -> 이미 기동된 워커 -> 로그인 OK 순으로 우선 정렬
         n = len(avail)
         shift = self._rr_cursor % n
         rotated = avail[shift:] + avail[:shift]
-        rotated.sort(key=lambda w: (0 if (w.is_alive() and not w.is_busy()) else 1, 0 if w.login_state == "ok" else 1))
+        rotated.sort(
+            key=lambda w: (
+                w._pending_count + (1 if w._lock.locked() else 0),
+                0 if w.is_alive() else 1,
+                0 if w.login_state == "ok" else 1,
+            )
+        )
         return rotated, None
+
+    async def _acquire_next_worker(self, tried_ports: set[int]) -> Optional[GeminiWorker]:
+        """병렬 요청이 동일 계정에 몰리지 않도록 `_queue_lock` 아래에서 다음 가용 계정을 원자적으로 예약한다."""
+        async with self._queue_lock:
+            candidates, _ = self._ordered_candidates()
+            for w in candidates:
+                if w.port in tried_ports or w.is_cooling_down():
+                    continue
+                w._pending_count += 1
+                return w
+            return None
 
     def _raise_all_exhausted(self, earliest: Optional[GeminiWorker], errors: List[str]) -> None:
         if earliest is not None:
@@ -1656,11 +1693,13 @@ class GeminiPool:
         client_app: str = "",
         ip_addr: str = "",
     ) -> Dict[str, Any]:
-        """가용 계정을 순회하며 이미지를 생성한다. 한도 도달 시 자동으로 다음 계정으로 전환한다."""
+        """가용 계정을 순회하며 이미지를 생성한다. 병렬 요청은 유휴 계정에 분산되며 한도 시 다음 계정으로 전환한다."""
         t0 = time.time()
         errors: List[str] = []
-        candidates, earliest = self._ordered_candidates()
-        if not candidates:
+        tried_ports: set[int] = set()
+        first_worker = await self._acquire_next_worker(tried_ports)
+        if first_worker is None:
+            _, earliest = self._ordered_candidates()
             self._raise_all_exhausted(earliest, errors)
 
         self.active_count += 1
@@ -1668,12 +1707,12 @@ class GeminiPool:
         self.task_start_time = t0
         self._push({"type": "task_start", "task": self.current_task, "source": source})
         try:
-            for worker in candidates:
-                if worker.is_cooling_down():
-                    continue
-                await self._enforce_max_active_browsers(worker.port)
+            worker = first_worker
+            while worker is not None:
+                tried_ports.add(worker.port)
                 w_t0 = time.time()
                 try:
+                    await self._enforce_max_active_browsers(worker.port)
                     res = await worker.generate_image(
                         prompt,
                         file_paths=file_paths,
@@ -1732,7 +1771,6 @@ class GeminiPool:
                         full_response=str(exc)[:500],
                     )
                     print(f"[*] [Failover] [{worker.name}] 불가({type(exc).__name__}) -> 다음 계정으로 자동 전환합니다.")
-                    continue
                 except Exception as exc:
                     errors.append(f"[{worker.name}] {type(exc).__name__}: {exc}")
                     self._rr_cursor += 1
@@ -1749,7 +1787,9 @@ class GeminiPool:
                         ip_addr=ip_addr,
                         full_response=str(exc)[:500],
                     )
-                    continue
+                finally:
+                    worker._pending_count = max(0, worker._pending_count - 1)
+                worker = await self._acquire_next_worker(tried_ports)
 
             # 모든 후보 실패
             _, next_earliest = self._ordered_candidates()
@@ -1772,10 +1812,12 @@ class GeminiPool:
         ip_addr: str = "",
         model: str = "gemini-web",
     ) -> AsyncGenerator[str, None]:
-        """가용 계정을 순회하며 텍스트 응답을 스트리밍한다. 한도 도달 시 다음 계정으로 자동 전환한다."""
+        """가용 계정을 순회하며 텍스트 응답을 스트리밍한다. 병렬 요청은 유휴 계정에 분산된다."""
         errors: List[str] = []
-        candidates, earliest = self._ordered_candidates()
-        if not candidates:
+        tried_ports: set[int] = set()
+        first_worker = await self._acquire_next_worker(tried_ports)
+        if first_worker is None:
+            _, earliest = self._ordered_candidates()
             self._raise_all_exhausted(earliest, errors)
 
         self.active_count += 1
@@ -1783,13 +1825,13 @@ class GeminiPool:
         self.task_start_time = time.time()
         self._push({"type": "task_start", "task": self.current_task, "source": source})
         try:
-            for worker in candidates:
-                if worker.is_cooling_down():
-                    continue
-                await self._enforce_max_active_browsers(worker.port)
+            worker = first_worker
+            while worker is not None:
+                tried_ports.add(worker.port)
                 w_t0 = time.time()
                 collected: List[str] = []
                 try:
+                    await self._enforce_max_active_browsers(worker.port)
                     async for delta in worker.stream_query(prompt, reset_chat=reset_chat, file_paths=file_paths):
                         collected.append(delta)
                         yield delta
@@ -1828,13 +1870,14 @@ class GeminiPool:
                     )
                     if collected:
                         raise  # 이미 일부 스트리밍을 클라이언트로 보낸 뒤라면 중복 출력 방지
-                    continue
                 except Exception as exc:
                     errors.append(f"[{worker.name}] {type(exc).__name__}: {exc}")
                     self._rr_cursor += 1
                     if collected:
                         raise
-                    continue
+                finally:
+                    worker._pending_count = max(0, worker._pending_count - 1)
+                worker = await self._acquire_next_worker(tried_ports)
 
             _, next_earliest = self._ordered_candidates()
             self._raise_all_exhausted(next_earliest, errors)

@@ -249,6 +249,67 @@ class TestGeminiBridgeCore(unittest.TestCase):
             self.assertEqual(body["latest_version"], "0.2.0")
             self.assertEqual(body["release"]["exe_url"], "https://example.com/amv-gn-bridge.exe")
 
+    def test_parallel_requests_dispatch_across_distinct_workers(self) -> None:
+        pool = engine.GeminiPool(mode="hot")
+        w1 = engine.GeminiWorker(9337, "acct1", str(self.tmp / "p1"), mode="hot")
+        w2 = engine.GeminiWorker(9338, "acct2", str(self.tmp / "p2"), mode="hot")
+        w3 = engine.GeminiWorker(9339, "acct3", str(self.tmp / "p3"), mode="hot")
+        for w in (w1, w2, w3):
+            w.login_state = "ok"
+        pool.workers = [w1, w2, w3]
+
+        fake_b64 = base64.b64encode(b"x" * 100).decode("ascii")
+        started_ports: list[int] = []
+
+        async def run_parallel() -> list[int]:
+            async def fake_gen(w: engine.GeminiWorker, prompt: str, **kwargs):
+                started_ports.append(w.port)
+                await asyncio.sleep(0.15)
+                return {
+                    "images": [{"b64_json": fake_b64, "mime_type": "image/png", "sha256": "abc", "bytes_len": 100}],
+                    "text": "",
+                    "worker_port": w.port,
+                    "account_name": w.name,
+                }
+
+            def make_gen(w: engine.GeminiWorker):
+                async def _impl(*a, **kw):
+                    return await fake_gen(w, *a, **kw)
+                return _impl
+
+            with patch.object(w1, "is_alive", return_value=False), \
+                 patch.object(w2, "is_alive", return_value=False), \
+                 patch.object(w3, "is_alive", return_value=False), \
+                 patch.object(w1, "generate_image", side_effect=make_gen(w1)), \
+                 patch.object(w2, "generate_image", side_effect=make_gen(w2)), \
+                 patch.object(w3, "generate_image", side_effect=make_gen(w3)):
+                results = await asyncio.gather(
+                    pool.generate_image("p1"),
+                    pool.generate_image("p2"),
+                    pool.generate_image("p3"),
+                )
+            return [r["worker_port"] for r in results]
+
+        used_ports = asyncio.run(run_parallel())
+        self.assertEqual(set(used_ports), {9337, 9338, 9339})
+        self.assertEqual(len(started_ports), 3)
+        for w in (w1, w2, w3):
+            self.assertEqual(w._pending_count, 0)
+
+    def test_sorry_url_fast_failover(self) -> None:
+        self.assertTrue(engine._is_sorry_url("https://www.google.com/sorry/index?continue=https://gemini.google.com/app"))
+        self.assertFalse(engine._is_sorry_url("https://gemini.google.com/app"))
+        w = engine.GeminiWorker(9337, "acct1", str(self.tmp / "p1"), mode="hot")
+        fake_page = MagicMock()
+        fake_page.url = "https://www.google.com/sorry/index?continue=https://gemini.google.com/app"
+        fake_page.goto = AsyncMock()
+        with patch.object(w, "connect", AsyncMock(return_value=fake_page)), \
+             patch.object(engine.asyncio, "sleep", AsyncMock()):
+            with self.assertRaises(engine.GeminiLoginRequired):
+                asyncio.run(w._prepare_page(reset_chat=True))
+        self.assertTrue(w.is_cooling_down())
+        self.assertEqual(w.cooldown_kind, "login")
+
 
 if __name__ == "__main__":
     unittest.main()
