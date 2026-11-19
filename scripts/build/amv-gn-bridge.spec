@@ -17,13 +17,14 @@ datas = [(ICON, ".")]
 binaries = []
 hiddenimports = [
     "tkinter", "tkinter.ttk", "tkinter.messagebox", "sqlite3",
+    "mcp", "mcp.server", "mcp.server.fastmcp", "mcp.types", "mcp.shared",
     "amv_gn_bridge", "amv_gn_bridge._version", "amv_gn_bridge.updater",
     "amv_gn_bridge.settings", "amv_gn_bridge.telemetry_db", "amv_gn_bridge.engine",
     "amv_gn_bridge.gateway", "amv_gn_bridge.mcp_server", "amv_gn_bridge.gui",
 ]
 
 for package in ("uvicorn", "fastapi", "starlette", "pydantic", "websockets",
-                "customtkinter", "PIL", "playwright", "certifi", "mcp"):
+                "customtkinter", "PIL", "playwright", "certifi"):
     collected = collect_all(package)
     datas += collected[0]
     binaries += collected[1]
