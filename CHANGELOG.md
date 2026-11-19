@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1
+
+### Fixed
+- **Fast `/health` & `list_accounts()` Port Probing**: Added a `0.08s` localhost TCP socket pre-check with `ProxyHandler({})` before `/json/version` in `GeminiWorker.is_alive()` and parallelized `GeminiPool.list_accounts()` with `ThreadPoolExecutor`, reducing multi-account status checks from `3.1s+` to `<0.15s` and preventing `/health` client timeouts.
+- **GitHub Actions PyInstaller Release Workflow**: Removed unused `collect_all("mcp")` CLI import dependency in `amv-gn-bridge.spec` and gated GitHub Release publishing on `refs/tags/v*` in `.github/workflows/release.yml`.
+
 ## 0.1.0
 
 ### Added

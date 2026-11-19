@@ -7,7 +7,7 @@
 [🤖 FOR_AI_README (AI 에이전트 전용 운영 매뉴얼)](FOR_AI_README.md) · [📋 CHANGELOG](CHANGELOG.md)
 
 <p>
-  <img src="https://img.shields.io/badge/v0.1.0-blue?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/v0.1.1-blue?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/Windows%20%7C%20macOS-supported-green?style=flat-square" alt="platform">
   <img src="https://img.shields.io/badge/License-Apache--2.0-blue?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/Multi--Account-Auto%20Failover-indigo?style=flat-square" alt="failover">

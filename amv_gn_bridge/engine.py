@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import concurrent.futures
 import hashlib
 import io
 import json
@@ -415,6 +416,9 @@ def _load_accounts() -> List[Dict[str, Any]]:
     return defaults
 
 
+_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 class GeminiWorker:
     """단일 Google 계정용 Gemini 웹 CDP 워커."""
 
@@ -663,8 +667,11 @@ class GeminiWorker:
             return self._alive_cache  # type: ignore[attr-defined]
         alive = False
         try:
-            req = urllib.request.urlopen(f"{self.cdp_url}/json/version", timeout=0.6)
-            alive = req.status == 200
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(0.08)
+                sock.connect(("127.0.0.1", int(self.port)))
+            with _NO_PROXY_OPENER.open(f"{self.cdp_url}/json/version", timeout=0.5) as req:
+                alive = req.status == 200
         except Exception:
             pass
         self._alive_cache = alive
@@ -1490,7 +1497,10 @@ class GeminiPool:
         return persisted
 
     def list_accounts(self) -> List[Dict[str, Any]]:
-        return [w.brief() for w in self.workers]
+        if len(self.workers) <= 1:
+            return [w.brief() for w in self.workers]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(self.workers))) as pool:
+            return list(pool.map(lambda w: w.brief(), self.workers))
 
     def get_worker(self, port: int) -> Optional[GeminiWorker]:
         return next((w for w in self.workers if w.port == int(port)), None)
