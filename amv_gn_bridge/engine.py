@@ -14,6 +14,7 @@ import base64
 import concurrent.futures
 import hashlib
 import io
+import itertools
 import json
 import os
 import re
@@ -23,6 +24,7 @@ import sys
 import tempfile
 import time
 import urllib.request
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
@@ -227,7 +229,7 @@ def _find_browser_binary(profile_dir: Optional[str] = None, preferred_browser: O
 
 
 def _sanitize_profile_exit_type(profile_dir: str) -> None:
-    """Edge/Chrome 비정상 종료 기록으로 인한 '페이지 복원' 팝업 버블을 원천 방지한다."""
+    """Edge/Chrome 비정상 종료 기록 및 이전 세션 다중 탭 자동 복원을 원천 방지한다."""
     if not profile_dir:
         return
     pref_path = os.path.join(profile_dir, "Default", "Preferences")
@@ -245,11 +247,45 @@ def _sanitize_profile_exit_type(profile_dir: str) -> None:
             if profile_section.get("exited_cleanly") is not True:
                 profile_section["exited_cleanly"] = True
                 modified = True
+        session_section = prefs.get("session")
+        if not isinstance(session_section, dict):
+            session_section = {}
+            prefs["session"] = session_section
+            modified = True
+        # 5 = Open New Tab Page (이전 세션의 누적 탭 일괄 복원 차단)
+        if session_section.get("restore_on_startup") != 5:
+            session_section["restore_on_startup"] = 5
+            modified = True
         if modified:
             with open(pref_path, "w", encoding="utf-8") as f:
                 json.dump(prefs, f, ensure_ascii=False)
     except Exception:
         pass
+
+
+def _prune_stale_session_files(profile_dir: str) -> int:
+    """브라우저 미실행 상태에서 누적된 Sessions/Tabs_* 스냅샷을 정리해 탭 폭주와 부팅 병목을 제거한다.
+    (쿠키·Google 로그인 토큰·Preferences는 100% 보존한다.)
+    """
+    if not profile_dir:
+        return 0
+    sessions_dir = os.path.join(profile_dir, "Default", "Sessions")
+    if not os.path.isdir(sessions_dir):
+        return 0
+    removed = 0
+    try:
+        for fn in os.listdir(sessions_dir):
+            if fn.startswith(("Tabs_", "Session_")):
+                fp = os.path.join(sessions_dir, fn)
+                try:
+                    if os.path.isfile(fp):
+                        os.unlink(fp)
+                        removed += 1
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return removed
 
 
 def _extract_profile_account_hint(profile_dir: str) -> str:
@@ -684,7 +720,7 @@ class GeminiWorker:
         return alive
 
     def is_busy(self) -> bool:
-        return self._lock.locked() or self._pending_count > 0
+        return self._lock.locked() or self.verifying or self._pending_count > 0
 
     async def ensure_running(self, visible: bool = False) -> bool:
         if self.is_alive():
@@ -698,6 +734,7 @@ class GeminiWorker:
         print(f"[!] [{self.name}] 포트 {self.port} Gemini 브라우저 기동 중...")
         os.makedirs(self.profile_dir, exist_ok=True)
         _sanitize_profile_exit_type(self.profile_dir)
+        _prune_stale_session_files(self.profile_dir)
         browser_path = _find_browser_binary(self.profile_dir, self.preferred_browser)
         args = [
             browser_path,
@@ -733,13 +770,22 @@ class GeminiWorker:
         self.__dict__.pop("_pids_cache_time", None)
         self.__dict__.pop("_alive_cache_time", None)
 
+        poll_fn = getattr(proc, "poll", None)
         for _ in range(30):
             await asyncio.sleep(0.5)
             self.__dict__.pop("_alive_cache_time", None)
             if self.is_alive():
                 print(f"[+] [{self.name}] 포트 {self.port} CDP 준비 완료.")
                 return True
-        raise RuntimeError(f"[{self.name}] 포트 {self.port} 브라우저를 기동할 수 없습니다.")
+            if callable(poll_fn):
+                rc = poll_fn()
+                if isinstance(rc, int) and not isinstance(rc, bool):
+                    break
+        self.kill_browser_process(force=True)
+        raise RuntimeError(
+            f"[{self.name}] 포트 {self.port} 브라우저 디버깅 포트를 열 수 없습니다. "
+            "동일 프로필 폴더로 이미 열린 Edge 창이 있다면 닫은 뒤 다시 시도하십시오."
+        )
 
     async def connect(self, *, visible: bool = False) -> Page:
         await self.ensure_running(visible=visible)
@@ -749,8 +795,9 @@ class GeminiWorker:
             self.browser = await self.playwright.chromium.connect_over_cdp(self.cdp_url)
             self.context = self.browser.contexts[0] if self.browser.contexts else await self.browser.new_context()
 
+        pages = list(self.context.pages) if isinstance(getattr(self.context, "pages", None), list) else []
         target_page = None
-        for p in self.context.pages:
+        for p in pages:
             url = (p.url or "").lower()
             if "gemini.google.com" in url or _is_login_url(url):
                 target_page = p
@@ -759,6 +806,15 @@ class GeminiWorker:
             target_page = await self.context.new_page()
             await target_page.goto(GEMINI_URL, wait_until="domcontentloaded", timeout=60000)
             await asyncio.sleep(2.0)
+        elif len(pages) > 1:
+            for extra in pages:
+                if extra is target_page:
+                    continue
+                try:
+                    if not extra.is_closed():
+                        await extra.close()
+                except Exception:
+                    pass
 
         self.page = target_page
         return self.page
@@ -802,17 +858,7 @@ class GeminiWorker:
     async def cleanup(self):
         self._tab_request_count = 0
         self._needs_tab_recycle = False
-        try:
-            if self.page and not self.page.is_closed():
-                await self.page.close()
-        except Exception:
-            pass
         self.page = None
-        try:
-            if self.context:
-                await self.context.close()
-        except Exception:
-            pass
         self.context = None
         try:
             if self.browser:
@@ -949,18 +995,31 @@ class GeminiWorker:
             await asyncio.sleep(0.5)
         return False
 
-    async def open_login(self, timeout: float = LOGIN_TIMEOUT_SEC) -> bool:
-        """사용자가 Google 계정으로 직접 로그인할 수 있도록 브라우저 창을 전면에 띄운다."""
+    async def open_login(self, timeout: float = LOGIN_TIMEOUT_SEC, *, hold_if_signed_in: bool = True) -> bool:
+        """사용자가 Google 계정으로 직접 로그인하거나 이미 연결된 창을 확인·전환할 수 있도록 브라우저 창을 전면에 띄운다."""
         async with self._lock:
             self._cancel_standby()
+            was_signed_in = self.login_state == "ok"
             try:
                 await self._teardown_browser(force=True)
                 await self.ensure_running(visible=True)
                 page = await self.connect(visible=True)
                 await self._bring_window_to_front(page)
                 connected = await self._wait_for_signed_in_composer(page, timeout=timeout)
+                if connected and hold_if_signed_in and was_signed_in:
+                    # '창 열기' 모드: 사용자가 계정을 확인·전환한 뒤 직접 창을 닫을 때까지 유지
+                    hold_deadline = time.time() + max(10.0, float(timeout))
+                    while time.time() < hold_deadline:
+                        if not self.browser or not self.browser.is_connected() or page.is_closed():
+                            break
+                        await asyncio.sleep(0.5)
+                    if self.browser and self.browser.is_connected() and not page.is_closed():
+                        connected = not await self._is_signed_out_page(page)
                 if connected:
-                    ident = await _extract_gemini_identity(page, self.profile_dir) or self.login_identity
+                    if self.browser and self.browser.is_connected() and not page.is_closed():
+                        ident = await _extract_gemini_identity(page, self.profile_dir) or self.login_identity
+                    else:
+                        ident = _extract_profile_account_hint(self.profile_dir) or self.login_identity
                     self.clear_cooldown()
                     self._set_login_state("ok")
                     self._persist_meta(identity=ident, detail="verified_login", verified_at=time.time())
@@ -1024,6 +1083,7 @@ class GeminiWorker:
             was_alive = self.is_alive()
             self._cancel_standby()
             probe_page: Optional[Page] = None
+            opened_new_probe = False
             ctx: Optional[BrowserContext] = None
             own_pw = None
             own_browser = None
@@ -1037,7 +1097,17 @@ class GeminiWorker:
                     own_browser = await own_pw.chromium.connect_over_cdp(self.cdp_url)
                     ctx = own_browser.contexts[0] if own_browser.contexts else await own_browser.new_context()
 
-                probe_page = await ctx.new_page()
+                existing_pages = [p for p in ctx.pages if not p.is_closed()]
+                if not was_alive and existing_pages:
+                    probe_page = existing_pages[0]
+                    for extra in existing_pages[1:]:
+                        try:
+                            await extra.close()
+                        except Exception:
+                            pass
+                else:
+                    probe_page = await ctx.new_page()
+                    opened_new_probe = True
                 try:
                     await probe_page.goto(GEMINI_URL, wait_until="domcontentloaded", timeout=min(30000, int(timeout * 1000)))
                 except Exception:
@@ -1071,7 +1141,7 @@ class GeminiWorker:
                 return self.brief()
             finally:
                 self.verifying = False
-                if probe_page is not None and not probe_page.is_closed():
+                if opened_new_probe and probe_page is not None and not probe_page.is_closed():
                     try:
                         await probe_page.close()
                     except Exception:
@@ -1273,30 +1343,49 @@ class GeminiWorker:
                 if file_paths:
                     await self._attach_files(page, file_paths)
 
-                # '업로드 및 도구' -> '이미지 만들기' 클릭 및 한도(aria-disabled) 즉시 판별
-                tools_btn = page.get_by_label(re.compile(r"업로드 및 도구|Upload|Tools", re.IGNORECASE)).first
-                await tools_btn.click(timeout=8000)
-                await asyncio.sleep(0.6)
-                create_item = page.locator("span:visible, button:visible, [role=menuitem]:visible").filter(
-                    has_text=re.compile(r"^\s*(이미지 만들기|Create images?)\s*$", re.IGNORECASE)
-                ).first
-                if await create_item.count() > 0:
-                    disabled = bool(
-                        await create_item.evaluate("e => !!e.closest('[aria-disabled=true], .mdc-list-item--disabled')")
-                    )
-                    if disabled:
-                        body_txt = await page.inner_text("body", timeout=3000)
-                        note_m = re.search(
-                            r"(한도[^\n]{0,60}재설정[^\n]{0,20}|limit[^\n]{0,60}reset[^\n]{0,20}|오[전후]\s*\d{1,2}:\d{2}[^\n]{0,30})",
-                            body_txt,
-                            re.IGNORECASE,
-                        )
-                        msg = note_m.group(0).strip() if note_m else "이미지 만들기가 비활성(일일 한도 도달)"
-                        wait = parse_reset_wait_sec(msg)
-                        self.mark_quota(msg, reset_wait_sec=wait)
-                        raise GeminiQuotaError(f"[{self.name}] {msg}", reset_wait_sec=wait)
-                    await create_item.click(timeout=8000)
-                    await asyncio.sleep(0.7)
+                # '업로드 및 도구' -> '이미지 만들기' 클릭 및 한도(aria-disabled) 즉시 판별 (UI 오버레이 지연 대비 3회 재시도)
+                for menu_attempt in range(3):
+                    try:
+                        tools_btn = page.get_by_label(re.compile(r"업로드 및 도구|Upload|Tools", re.IGNORECASE)).first
+                        await tools_btn.click(timeout=10000)
+                        await asyncio.sleep(0.6)
+                        create_item = page.locator("span:visible, button:visible, [role=menuitem]:visible").filter(
+                            has_text=re.compile(r"^\s*(이미지 만들기|Create images?)\s*$", re.IGNORECASE)
+                        ).first
+                        if await create_item.count() > 0:
+                            disabled = bool(
+                                await create_item.evaluate("e => !!e.closest('[aria-disabled=true], .mdc-list-item--disabled')")
+                            )
+                            if disabled:
+                                body_txt = await page.inner_text("body", timeout=3000)
+                                note_m = re.search(
+                                    r"(한도[^\n]{0,60}재설정[^\n]{0,20}|limit[^\n]{0,60}reset[^\n]{0,20}|오[전후]\s*\d{1,2}:\d{2}[^\n]{0,30})",
+                                    body_txt,
+                                    re.IGNORECASE,
+                                )
+                                msg = note_m.group(0).strip() if note_m else "이미지 만들기가 비활성(일일 한도 도달)"
+                                wait = parse_reset_wait_sec(msg)
+                                self.mark_quota(msg, reset_wait_sec=wait)
+                                raise GeminiQuotaError(f"[{self.name}] {msg}", reset_wait_sec=wait)
+                            await create_item.click(timeout=10000)
+                            await asyncio.sleep(0.7)
+                            break
+                        if menu_attempt < 2:
+                            try:
+                                await page.keyboard.press("Escape")
+                            except Exception:
+                                pass
+                            await asyncio.sleep(0.6)
+                    except GeminiQuotaError:
+                        raise
+                    except Exception:
+                        if menu_attempt >= 2:
+                            raise
+                        try:
+                            await page.keyboard.press("Escape")
+                        except Exception:
+                            pass
+                        await asyncio.sleep(0.6)
 
                 composer = page.locator(COMPOSER_SELECTOR).first
                 await composer.click()
@@ -1470,6 +1559,8 @@ class GeminiPool:
         self._accounts_mtime: float = os.path.getmtime(CONFIG_PATH) if os.path.isfile(CONFIG_PATH) else 0.0
         self._rr_cursor: int = 0
         self._queue_lock = asyncio.Lock()
+        self._wait_tickets: deque[int] = deque()
+        self._ticket_seq = itertools.count(1)
         self.queued_count: int = 0
         self.active_count: int = 0
         self.current_task: Optional[str] = None
@@ -1661,15 +1752,45 @@ class GeminiPool:
         return rotated, None
 
     async def _acquire_next_worker(self, tried_ports: set[int]) -> Optional[GeminiWorker]:
-        """병렬 요청이 동일 계정에 몰리지 않도록 `_queue_lock` 아래에서 다음 가용 계정을 원자적으로 예약한다."""
-        async with self._queue_lock:
-            candidates, _ = self._ordered_candidates()
-            for w in candidates:
-                if w.port in tried_ports or w.is_cooling_down():
-                    continue
-                w._pending_count += 1
-                return w
-            return None
+        """병렬 요청은 모든 유휴 계정에 즉시 분산하고, 모든 가용 계정이 작업 중이면 엄격한 FIFO 티켓 큐로 대기시킨다."""
+        ticket: Optional[int] = None
+        try:
+            while True:
+                async with self._queue_lock:
+                    candidates, _ = self._ordered_candidates()
+                    eligible = [
+                        w for w in candidates
+                        if w.port not in tried_ports and not w.is_cooling_down()
+                    ]
+                    if not eligible:
+                        return None
+
+                    idle = [w for w in eligible if not w.is_busy()]
+                    if idle and (
+                        (ticket is None and not self._wait_tickets)
+                        or (ticket is not None and self._wait_tickets and self._wait_tickets[0] == ticket)
+                    ):
+                        if ticket is not None:
+                            self._wait_tickets.popleft()
+                            ticket = None
+                            self.queued_count = max(0, self.queued_count - 1)
+                        chosen = idle[0]
+                        chosen._pending_count += 1
+                        self._rr_cursor = (self._rr_cursor + 1) % max(1, len(self.workers))
+                        return chosen
+
+                    if ticket is None:
+                        ticket = next(self._ticket_seq)
+                        self._wait_tickets.append(ticket)
+                        self.queued_count += 1
+                await asyncio.sleep(0.15)
+        finally:
+            if ticket is not None:
+                try:
+                    self._wait_tickets.remove(ticket)
+                except ValueError:
+                    pass
+                self.queued_count = max(0, self.queued_count - 1)
 
     def _raise_all_exhausted(self, earliest: Optional[GeminiWorker], errors: List[str]) -> None:
         if earliest is not None:

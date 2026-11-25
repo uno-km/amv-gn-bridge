@@ -165,7 +165,7 @@ async def root():
 @app.get("/health")
 @app.get("/status")
 async def health():
-    accounts = engine.list_accounts()
+    accounts = await asyncio.to_thread(engine.list_accounts)
     avail = sum(1 for a in accounts if not a["cooling_down"] and a["login_state"] != "required")
     return {
         "ok": True,
@@ -175,6 +175,7 @@ async def health():
         "accounts_total": len(accounts),
         "accounts_available": avail,
         "active_tasks": engine.active_count,
+        "queued_tasks": engine.queued_count,
     }
 
 
@@ -182,8 +183,9 @@ async def health():
 async def api_status():
     summary = telemetry_db.get_summary()
     by_acct = summary.get("by_account", {})
+    accounts = await asyncio.to_thread(engine.list_accounts)
     workers = []
-    for w in engine.list_accounts():
+    for w in accounts:
         st = by_acct.get(str(w["port"]), {})
         w["today_queries"] = st.get("today_queries", 0)
         w["total_queries"] = st.get("queries", 0)
@@ -194,6 +196,7 @@ async def api_status():
         "mode": engine.mode,
         "settings": engine.settings,
         "active_count": engine.active_count,
+        "queued_count": engine.queued_count,
         "current_task": engine.current_task,
         "task_start_time": engine.task_start_time,
         "server_time": time.time(),
@@ -267,7 +270,8 @@ async def api_update_apply():
 
 @app.get("/api/accounts")
 async def api_list_accounts():
-    return {"accounts": engine.list_accounts(), "server_time": time.time()}
+    accounts = await asyncio.to_thread(engine.list_accounts)
+    return {"accounts": accounts, "server_time": time.time()}
 
 
 @app.post("/api/accounts", status_code=201)

@@ -14,6 +14,7 @@ import base64
 import json
 import os
 import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import List, Optional
@@ -38,6 +39,16 @@ except (ImportError, ValueError):
 
 mcp = FastMCP("gemini-bridge")
 engine = GeminiEngine()
+MCP_GATEWAY_TIMEOUT_SEC = max(60, int(os.environ.get("GEMINI_MCP_TIMEOUT_SEC", "360")))
+
+
+def _is_gateway_unreachable(exc: Exception) -> bool:
+    """게이트웨이가 실제로 내려간 경우(ConnectionRefused)에만 로컬 직결 폴백을 허용한다."""
+    if isinstance(exc, ConnectionRefusedError):
+        return True
+    if isinstance(exc, urllib.error.URLError) and not isinstance(exc, urllib.error.HTTPError):
+        return isinstance(exc.reason, (ConnectionRefusedError, FileNotFoundError))
+    return False
 
 
 def _find_gateway_url() -> Optional[str]:
@@ -87,11 +98,23 @@ async def ask_gemini(prompt: str, mode: str = "auto") -> str:
             )
             loop = asyncio.get_running_loop()
             resp = await loop.run_in_executor(
-                None, lambda: json.loads(urllib.request.urlopen(req, timeout=240).read().decode("utf-8"))
+                None,
+                lambda: json.loads(
+                    urllib.request.urlopen(req, timeout=MCP_GATEWAY_TIMEOUT_SEC).read().decode("utf-8")
+                ),
             )
             return str(resp["choices"][0]["message"]["content"])
+        except urllib.error.HTTPError as exc:
+            err_body = ""
+            try:
+                err_body = exc.read().decode("utf-8", errors="replace")[:400]
+            except Exception:
+                pass
+            return f"[오류 발생] 게이트웨이 HTTP {exc.code}: {err_body or exc.reason}"
         except Exception as exc:
-            print(f"[!] Gateway call failed, falling back to direct engine: {exc}", file=sys.stderr)
+            if not _is_gateway_unreachable(exc):
+                return f"[오류 발생] 게이트웨이 질의 실패(이중 실행 방지): {type(exc).__name__}: {exc}"
+            print(f"[!] Gateway unreachable, falling back to direct engine: {exc}", file=sys.stderr)
 
     try:
         return await engine.query(full_prompt, source="mcp:gemini-bridge", client_app="mcp", model=model)
@@ -140,7 +163,10 @@ async def generate_gemini_image(
             )
             loop = asyncio.get_running_loop()
             resp = await loop.run_in_executor(
-                None, lambda: json.loads(urllib.request.urlopen(req, timeout=300).read().decode("utf-8"))
+                None,
+                lambda: json.loads(
+                    urllib.request.urlopen(req, timeout=MCP_GATEWAY_TIMEOUT_SEC).read().decode("utf-8")
+                ),
             )
             items = resp.get("data") or []
             if not items:
@@ -150,8 +176,17 @@ async def generate_gemini_image(
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_bytes(raw)
             return f"생성 완료: {out} ({len(raw)} bytes, 계정={resp.get('account_name')}:{resp.get('worker_port')})"
+        except urllib.error.HTTPError as exc:
+            err_body = ""
+            try:
+                err_body = exc.read().decode("utf-8", errors="replace")[:400]
+            except Exception:
+                pass
+            return f"[오류 발생] 게이트웨이 이미지 HTTP {exc.code}: {err_body or exc.reason}"
         except Exception as exc:
-            print(f"[!] Gateway image call failed, falling back to direct engine: {exc}", file=sys.stderr)
+            if not _is_gateway_unreachable(exc):
+                return f"[오류 발생] 게이트웨이 이미지 생성 실패(이중 실행 방지): {type(exc).__name__}: {exc}"
+            print(f"[!] Gateway image unreachable, falling back to direct engine: {exc}", file=sys.stderr)
 
     try:
         res = await engine.generate_image(prompt, file_paths=refs, source="mcp:gemini-bridge", client_app="mcp")

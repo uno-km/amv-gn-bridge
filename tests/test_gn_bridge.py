@@ -310,6 +310,151 @@ class TestGeminiBridgeCore(unittest.TestCase):
         self.assertTrue(w.is_cooling_down())
         self.assertEqual(w.cooldown_kind, "login")
 
+    def test_profile_sanitize_prunes_sessions_preserves_cookies(self) -> None:
+        prof = self.tmp / "edge_prof"
+        default_dir = prof / "Default"
+        sess_dir = default_dir / "Sessions"
+        sess_dir.mkdir(parents=True, exist_ok=True)
+        prefs = default_dir / "Preferences"
+        prefs.write_text(json.dumps({"profile": {"exit_type": "Crashed", "exited_cleanly": False}}), encoding="utf-8")
+        cookies = default_dir / "Cookies"
+        cookies.write_bytes(b"SQLITE_COOKIES_DATA")
+        tabs_f = sess_dir / "Tabs_13370001"
+        sess_f = sess_dir / "Session_13370001"
+        tabs_f.write_bytes(b"x" * 1024)
+        sess_f.write_bytes(b"y" * 512)
+
+        engine._sanitize_profile_exit_type(str(prof))
+        removed = engine._prune_stale_session_files(str(prof))
+
+        self.assertEqual(removed, 2)
+        self.assertFalse(tabs_f.exists())
+        self.assertFalse(sess_f.exists())
+        self.assertTrue(cookies.exists())
+        saved_prefs = json.loads(prefs.read_text(encoding="utf-8"))
+        self.assertEqual(saved_prefs["profile"]["exit_type"], "Normal")
+        self.assertTrue(saved_prefs["profile"]["exited_cleanly"])
+        self.assertEqual(saved_prefs["session"]["restore_on_startup"], 5)
+
+    def test_connect_trims_extra_tabs_to_single_page(self) -> None:
+        w = engine.GeminiWorker(9337, "acct1", str(self.tmp / "p1"), mode="hot")
+
+        def make_tab(url: str) -> MagicMock:
+            p = MagicMock()
+            p.url = url
+            p.is_closed.return_value = False
+            p.close = AsyncMock()
+            return p
+
+        p1 = make_tab(engine.GEMINI_URL)
+        p2 = make_tab("about:blank")
+        p3 = make_tab("edge://newtab/")
+        ctx = MagicMock()
+        ctx.pages = [p1, p2, p3]
+        browser = MagicMock()
+        browser.is_connected.return_value = True
+        browser.contexts = [ctx]
+
+        pw_obj = MagicMock()
+        pw_obj.chromium.connect_over_cdp = AsyncMock(return_value=browser)
+        pw_cm = MagicMock()
+        pw_cm.start = AsyncMock(return_value=pw_obj)
+
+        with patch.object(w, "ensure_running", AsyncMock(return_value=True)), \
+             patch.object(engine, "async_playwright", return_value=pw_cm):
+            page = asyncio.run(w.connect())
+
+        self.assertIs(page, p1)
+        p1.close.assert_not_awaited()
+        p2.close.assert_awaited_once()
+        p3.close.assert_awaited_once()
+
+    def test_ensure_running_kills_process_on_early_exit(self) -> None:
+        w = engine.GeminiWorker(9337, "acct1", str(self.tmp / "p1"), mode="hot")
+        fake_proc = MagicMock()
+        fake_proc.pid = 42424
+        fake_proc.poll.return_value = 0
+
+        with patch.object(w, "is_alive", return_value=False), \
+             patch.object(w, "kill_browser_process") as mock_kill, \
+             patch.object(engine, "_find_browser_binary", return_value="msedge.exe"), \
+             patch.object(engine.subprocess, "Popen", return_value=fake_proc), \
+             patch.object(engine.asyncio, "sleep", AsyncMock()):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(w.ensure_running(visible=False))
+
+        mock_kill.assert_called_with(force=True)
+
+    def test_fifo_queue_order_and_queued_vs_active_counts(self) -> None:
+        pool = engine.GeminiPool(mode="hot")
+        w1 = engine.GeminiWorker(9337, "acct1", str(self.tmp / "p1"), mode="hot")
+        w2 = engine.GeminiWorker(9338, "acct2", str(self.tmp / "p2"), mode="hot")
+        w1.login_state = "ok"
+        w2.login_state = "ok"
+        pool.workers = [w1, w2]
+
+        fake_b64 = base64.b64encode(b"z" * 100).decode("ascii")
+        started_order: list[str] = []
+        observed_counts: list[tuple[int, int]] = []
+
+        async def run_scenario() -> None:
+            def make_gen(w: engine.GeminiWorker):
+                async def _impl(prompt: str, **kwargs):
+                    started_order.append(prompt)
+                    await asyncio.sleep(0.35)
+                    return {
+                        "images": [{"b64_json": fake_b64, "mime_type": "image/png", "sha256": "abc", "bytes_len": 100}],
+                        "text": "",
+                        "worker_port": w.port,
+                        "account_name": w.name,
+                    }
+                return _impl
+
+            with patch.object(w1, "is_alive", return_value=False), \
+                 patch.object(w2, "is_alive", return_value=False), \
+                 patch.object(w1, "generate_image", side_effect=make_gen(w1)), \
+                 patch.object(w2, "generate_image", side_effect=make_gen(w2)):
+                tasks = []
+                for i in range(5):
+                    tasks.append(asyncio.create_task(pool.generate_image(f"req-{i}")))
+                    await asyncio.sleep(0.03)
+                await asyncio.sleep(0.05)
+                observed_counts.append((pool.active_count, pool.queued_count))
+                await asyncio.gather(*tasks)
+
+        asyncio.run(run_scenario())
+        self.assertEqual(observed_counts[0], (2, 3))
+        self.assertEqual(started_order[:2], ["req-0", "req-1"])
+        self.assertEqual(started_order[2:], ["req-2", "req-3", "req-4"])
+        self.assertEqual(pool.active_count, 0)
+        self.assertEqual(pool.queued_count, 0)
+
+    def test_mcp_does_not_double_launch_on_gateway_timeout_or_http_error(self) -> None:
+        import urllib.error
+        import io
+
+        mock_engine = MagicMock()
+        mock_engine.query = AsyncMock(return_value="should-not-run")
+        mock_engine.generate_image = AsyncMock(return_value={})
+
+        with patch.object(mcp_server, "engine", mock_engine), \
+             patch.object(mcp_server, "_find_gateway_url", return_value="http://127.0.0.1:11501"):
+            with patch.object(mcp_server.urllib.request, "urlopen", side_effect=TimeoutError("read timed out")):
+                res_q = asyncio.run(mcp_server.ask_gemini("hello"))
+                res_i = asyncio.run(mcp_server.generate_gemini_image("draw cat", str(self.tmp / "out.png")))
+            self.assertIn("이중 실행 방지", res_q)
+            self.assertIn("이중 실행 방지", res_i)
+
+            http_err = urllib.error.HTTPError(
+                "http://127.0.0.1:11501/v1/chat/completions", 429, "Too Many Requests", {}, io.BytesIO(b'{"detail":"quota"}')
+            )
+            with patch.object(mcp_server.urllib.request, "urlopen", side_effect=http_err):
+                res_429 = asyncio.run(mcp_server.ask_gemini("hello"))
+            self.assertIn("HTTP 429", res_429)
+
+        mock_engine.query.assert_not_awaited()
+        mock_engine.generate_image.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

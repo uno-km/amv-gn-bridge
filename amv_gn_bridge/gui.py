@@ -159,13 +159,13 @@ class GeminiBridgeGUI(ctk.CTk):
         val.pack(anchor="w", padx=12, pady=(0, 10))
         return val
 
-    def _api_call_bg(self, method: str, path: str, payload: Dict[str, Any] | None = None, on_done=None):
+    def _api_call_bg(self, method: str, path: str, payload: Dict[str, Any] | None = None, on_done=None, timeout: float = 120.0):
         def _work():
             try:
                 data = json.dumps(payload).encode("utf-8") if payload is not None else None
                 headers = {"Content-Type": "application/json"} if data is not None else {}
                 req = urllib.request.Request(f"{self.base_url}{path}", data=data, headers=headers, method=method)
-                with urllib.request.urlopen(req, timeout=120) as r:
+                with urllib.request.urlopen(req, timeout=timeout) as r:
                     res = json.loads(r.read().decode("utf-8", errors="replace"))
                 if on_done and not self._closing:
                     self.after(0, lambda: on_done(True, res))
@@ -309,7 +309,13 @@ class GeminiBridgeGUI(ctk.CTk):
 
     def _verify_all(self):
         self.notice_lbl.configure(text="전체 계정 순차 점검 시작 (RAM 보호를 위해 1개씩 점검)...")
-        self._api_call_bg("POST", "/api/accounts/verify", on_done=lambda ok, _: self.notice_lbl.configure(text="전체 계정 점검 완료"))
+        verify_timeout = max(120.0, 45.0 * max(2, len(self._workers_cache)))
+        self._api_call_bg(
+            "POST",
+            "/api/accounts/verify",
+            on_done=lambda ok, _: self.notice_lbl.configure(text="전체 계정 점검 완료" if ok else "전체 계정 점검 중 오류 발생"),
+            timeout=verify_timeout,
+        )
 
     def _login_one(self, port: int):
         self.notice_lbl.configure(text=f"포트 {port} Google 로그인 창을 띄웠습니다. 로그인 완료 후 자동 반영됩니다.")
