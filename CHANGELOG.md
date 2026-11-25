@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3
+
+### Fixed
+- Port-holder lookup (`netstat -ano` / `lsof`) decoded its output strictly; on a Windows console whose code page is not UTF-8 (Korean cp949) a decode error ended the reader thread and the port check silently found no process. Output is now decoded with `errors="replace"`.
+
+### Verified
+- 10 unit tests, `selftest` and a live gateway run from the installed wheel (health, status, models, accounts, settings; chat without a logged-in account ends with an explicit error, not a fake answer).
+
 ## 0.1.2
 
 ### Fixed

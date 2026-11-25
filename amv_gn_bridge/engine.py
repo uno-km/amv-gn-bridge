@@ -647,12 +647,12 @@ class GeminiWorker:
         try:
             port_str = str(int(self.port))
             if sys.platform == "darwin":
-                result = subprocess.run(["lsof", "-ti", f":{port_str}"], capture_output=True, text=True, timeout=3)
+                result = subprocess.run(["lsof", "-ti", f":{port_str}"], capture_output=True, text=True, errors="replace", timeout=3)
                 for line in result.stdout.strip().splitlines():
                     if line.strip().isdigit():
                         pids.append(int(line.strip()))
             else:
-                netstat = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, timeout=3)
+                netstat = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, errors="replace", timeout=3)
                 for line in netstat.stdout.splitlines():
                     if f":{port_str}" not in line or "LISTENING" not in line:
                         continue
