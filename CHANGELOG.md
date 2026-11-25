@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.1
+
+### Added
+- **CLI Parity (`purge` & `serve` alias)**: Added `amv-gn-bridge purge` command to terminate idle Gemini browser process trees and `serve` alias for `mcp` so CLI workflows align with `amv-cp-bridge`.
+- **Cross-Platform One-Line Installers**: Enhanced `scripts/setup_all.ps1` (downloads and unpacks `amv-gn-bridge-extension.zip`, adds install directory to User `PATH`, supports `AMV_NO_LAUNCH=1` for headless/agent installs) and added `scripts/setup_all.sh` for macOS/Linux.
+
+### Changed
+- **English-First `README.md` & Upgraded `FOR_AI_README.md`**: Rewrote `README.md` in clear, concise English and expanded `FOR_AI_README.md` with a step-by-step autonomous zero-to-working installation, MCP registration, verification, and sign-in handoff playbook for AI coding agents.
+
 ## 1.0.0
 
 ### Changed & Optimized

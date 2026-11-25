@@ -2,92 +2,189 @@
 
 # amv-gn-bridge
 
-**Google Gemini 웹 멀티계정 풀을 로컬 OpenAI 호환 REST API(`:11501`), FastMCP 및 브라우저 사이드바 확장프로그램으로 연결하는 한도 자동 순환 데스크톱 브릿지**
+**Local OpenAI-compatible REST API (`:11501`), FastMCP stdio server, desktop GUI, and browser sidebar bridge for multi-account Google Gemini Web with automatic quota failover.**
 
-[🤖 FOR_AI_README (AI 에이전트 전용 운영 매뉴얼)](FOR_AI_README.md) · [📋 CHANGELOG](CHANGELOG.md)
+[FOR_AI_README (Autonomous Agent Setup & Operating Manual)](FOR_AI_README.md) · [CHANGELOG](CHANGELOG.md) · [Releases](https://github.com/uno-km/amv-gn-bridge/releases)
 
 <p>
-  <img src="https://img.shields.io/badge/v1.0.0-blue?style=flat-square" alt="version">
-  <img src="https://img.shields.io/badge/Windows%20%7C%20macOS-supported-green?style=flat-square" alt="platform">
+  <img src="https://img.shields.io/badge/v1.0.1-blue?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/Windows%20%7C%20macOS%20%7C%20Linux-supported-green?style=flat-square" alt="platform">
   <img src="https://img.shields.io/badge/License-Apache--2.0-blue?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/Multi--Account-Auto%20Failover-indigo?style=flat-square" alt="failover">
   <img src="https://img.shields.io/badge/Quota%20Timer-HH%3AMM%3ASS%20Live-orange?style=flat-square" alt="countdown">
-  <img src="https://img.shields.io/badge/FastMCP-Native%20Supported-purple?style=flat-square" alt="fastmcp">
+  <img src="https://img.shields.io/badge/FastMCP-Native-purple?style=flat-square" alt="fastmcp">
 </p>
 
 </div>
 
 ---
 
-## 개요
-
-`amv-gn-bridge`는 여러 개의 무료/일반 Google Gemini 웹(`https://gemini.google.com/app`) 계정을 독립된 브라우저 프로필(CDP 포트 `9337+`)로 등록해 두고, **한 계정의 일일 한도가 차면 자동으로 다음 계정으로 전환(Auto-Failover)**하면서 텍스트 추론과 이미지 생성을 수행하는 로컬 게이트웨이입니다.
-
-- **무제한 계정 등록 및 원클릭 로그인**: 네이티브 GUI 및 웹 대시보드(`http://127.0.0.1:11501/dashboard`)에서 계정을 추가하고 `[계정 연결]`로 브라우저 창을 열어 Google 로그인을 완료하면 프로필에 세션이 유지됩니다.
-- **한도 도달 시 자동 다음 계정 전환**: 이미지 생성 메뉴의 비활성(`aria-disabled`) 상태 또는 한도 안내 문구를 감지하면 즉시 다음 가용 계정으로 전환합니다.
-- **한도별 시·분·초(`HH:MM:SS`) 실시간 카운트다운**: 한도에 걸린 시각과 재설정 시각(`오후 5:23에 재설정` 등 자동 파싱, 미표시 시 기본 6시간)을 기준으로 **남은 시간(`HH:MM:SS`)과 경과 시간(`HH:MM:SS`)**을 매초 카운트다운하며, `00:00:00` 도달 시 자동으로 가용 풀에 복귀합니다.
-- **16GB RAM 보호 및 프로세스 트리 정리**: 계정이 10개 이상 등록되어 있어도 동시에 켜두는 브라우저는 `max_active_browsers`(기본 1개)로 제한하고, 전환/종료 시 `taskkill /F /T`로 자식 프로세스까지 정리합니다. `hot` 모드에서는 15회 요청마다 렌더러 탭을 새 탭으로 리사이클링합니다.
-- **`amv-cp-bridge` 동일 규격**: 동일한 `telemetry.db` SQLite 스키마, OpenAI 호환 엔드포인트(`/v1/chat/completions`, `/v1/images/generations`), FastMCP 서버, 브라우저 사이드바 확장프로그램(`extension/`), 그리고 GitHub Releases 동적 감지 및 EXE 핫스왑 자동 재시작 업데이터를 제공합니다.
-
-> 💡 **AI 코딩 에이전트(Claude Code, Cursor, Antigravity 등) 연동**:  
-> 에이전트가 즉시 전체 API 계약과 에러 처리 규약을 파악할 수 있도록 **[🤖 FOR_AI_README.md](FOR_AI_README.md)**가 포함되어 있습니다.
+> **Want an AI coding agent to install and wire this up for you?**
+> Paste `https://github.com/uno-km/amv-gn-bridge` into Claude Code, Cursor, Antigravity, Windsurf, or Codex and ask it to follow **[FOR_AI_README.md](FOR_AI_README.md)**. It includes a complete step-by-step installation, MCP registration, verification, and troubleshooting playbook.
 
 ---
 
-## 빠른 시작
+## Overview
 
-### 1. 원클릭 설치 (Windows PowerShell)
+`amv-gn-bridge` connects one or more Google Gemini Web (`https://gemini.google.com/app`) accounts—each isolated in its own local browser profile and Chrome DevTools Protocol (CDP) port (`9337+`)—to a single local OpenAI-compatible endpoint (`http://127.0.0.1:11501`).
+
+- **Multi-Account Pool & Automatic Quota Failover**: Detects daily image or text limits via Gemini's `"Create images" / "이미지 만들기"` `aria-disabled` state or quota notice text, parses the reset timestamp (falling back to a configurable cooldown), tears down the exhausted browser process tree, and automatically fails over to the next available account.
+- **Live `HH:MM:SS` Per-Account Cooldown Countdown**: Tracks remaining and elapsed cooldown time per account in `~/.amv_gn_bridge/account_meta.json`, rendered live in both the desktop GUI and web dashboard (`/dashboard`), with automatic pool re-entry upon expiry.
+- **Strict FIFO Queue & Parallel Dispatch**: Spreads simultaneous requests across distinct idle accounts immediately and queues excess bursts in strict FIFO order (`queued_count` / `active_count` reported on `/api/status`).
+- **Low-Footprint Browser Lifecycle**: Enforces `max_active_browsers` (default `1`), prevents Chromium session-restore tab bloat (`restore_on_startup=5`, stale `Tabs_*`/`Session_*` pruning while preserving cookies), trims extra tabs to a single page, recycles renderer tabs every 15 requests in `hot` mode, and cleans up full process trees on teardown.
+- **Unified Interface & Coexistence**: Exposes OpenAI-compatible `/v1/chat/completions` and `/v1/images/generations`, FastMCP stdio tools, a Chrome/Edge/Whale Side Panel extension (`Ctrl+Shift+G`), SQLite WAL telemetry (`~/.amv_gn_bridge/telemetry.db`), and a SHA-256 verified GitHub Release hot-swap auto-updater. Runs cleanly alongside [`amv-cp-bridge`](https://github.com/uno-km/amv-cp-bridge) (`:11500` / CDP `9333–9336`) without port or profile collisions.
+
+---
+
+## Prerequisites
+
+- **Microsoft Edge** or **Google Chrome** installed locally (the bridge connects to your installed browser over CDP—do **not** run `playwright install`).
+- One or more Google accounts with access to `https://gemini.google.com/app`.
+- For source installs: **Python 3.10+** (not required when using the Windows single-file EXE).
+
+---
+
+## Quick Start
+
+### Option 1: One-Line Installer (Recommended)
+
+**Windows (PowerShell)** — downloads the latest verified `amv-gn-bridge.exe` + browser extension to `%LOCALAPPDATA%\amv-gn-bridge`, adds it to User `PATH`, and launches the GUI & `:11501` gateway:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/uno-km/amv-gn-bridge/main/scripts/setup_all.ps1 | iex"
 ```
 
-### 2. 소스에서 실행
+*(For headless/scripted installs without launching the GUI, set `$env:AMV_NO_LAUNCH = "1"` first.)*
+
+**macOS / Linux (Bash)** — installs into `~/.amv_gn_bridge/venv`, runs `selftest`, and links `~/.local/bin/amv-gn-bridge`:
 
 ```bash
-pip install -e . && python -m amv_gn_bridge.cli
+curl -fsSL https://raw.githubusercontent.com/uno-km/amv-gn-bridge/main/scripts/setup_all.sh | bash
 ```
 
-또는 Windows에서 `start_gui.bat`를 더블클릭하면 네이티브 데스크톱 GUI와 `:11501` 게이트웨이가 즉시 기동됩니다.
+### Option 2: Direct Windows EXE Download
+
+Download `amv-gn-bridge.exe` from [GitHub Releases](https://github.com/uno-km/amv-gn-bridge/releases/latest) and run it directly. No Python installation is required.
+
+### Option 3: Install from Source or Release Wheel
+
+```bash
+git clone https://github.com/uno-km/amv-gn-bridge.git && cd amv-gn-bridge && pip install -e . && amv-gn-bridge dashboard
+```
+
+Or install the wheel directly from [Releases](https://github.com/uno-km/amv-gn-bridge/releases/latest):
+
+```bash
+pip install https://github.com/uno-km/amv-gn-bridge/releases/latest/download/amv_gn_bridge-1.0.1-py3-none-any.whl
+```
 
 ---
 
-## OpenAI 호환 REST API (`http://127.0.0.1:11501`)
+## First-Run Account Sign-In
 
-### 텍스트 채팅 (`POST /v1/chat/completions`)
+1. Open the desktop GUI or browse to `http://127.0.0.1:11501/dashboard`.
+2. Add one or more Google accounts (`+ Add Account` / `POST /api/accounts`).
+3. Click **Connect Account** (or call `POST /api/accounts/{port}/login`) to open an isolated browser window and sign in to Google Gemini once.
+4. Session cookies remain local in that account's isolated profile directory; no credentials are transmitted to any third-party service.
+
+---
+
+## OpenAI-Compatible REST API (`http://127.0.0.1:11501`)
+
+### Text & Multimodal Chat (`POST /v1/chat/completions`)
+
+**macOS / Linux / Git Bash**
+```bash
+curl -s http://127.0.0.1:11501/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"gemini-web","messages":[{"role":"user","content":"Summarize SQLite WAL mode in 3 bullet points."}]}'
+```
+
+**Windows PowerShell**
+```powershell
+Invoke-RestMethod -Uri "http://127.0.0.1:11501/v1/chat/completions" -Method Post -ContentType "application/json" -Body '{"model":"gemini-web","messages":[{"role":"user","content":"Summarize SQLite WAL mode in 3 bullet points."}]}' | ConvertTo-Json -Depth 6
+```
+
+Supported models: `gemini-web`, `gemini-web-thinking`, `gemini-web-image`. Supports both `stream: true` (SSE) and `stream: false`.
+
+### Image Generation (`POST /v1/images/generations`)
 
 ```powershell
-Invoke-RestMethod -Uri "http://127.0.0.1:11501/v1/chat/completions" -Method Post -ContentType "application/json" -Body '{"model":"gemini-web","messages":[{"role":"user","content":"안녕하세요!"}]}'
+Invoke-RestMethod -Uri "http://127.0.0.1:11501/v1/images/generations" -Method Post -ContentType "application/json" -Body '{"prompt":"A photorealistic vertical 9:16 street scene in Seoul at dusk","model":"gemini-web-image"}'
 ```
 
-### 이미지 생성 (`POST /v1/images/generations`)
-
-```powershell
-Invoke-RestMethod -Uri "http://127.0.0.1:11501/v1/images/generations" -Method Post -ContentType "application/json" -Body '{"prompt":"A photorealistic vertical 9:16 street photo in Seoul at dusk","model":"gemini-web-image"}'
-```
+Optional `"reference_images"` accepts base64 `data:image/...` URIs or local file paths for character/style consistency.
 
 ---
 
-## FastMCP 및 브라우저 확장프로그램
+## CLI Reference
 
-- **MCP 서버 실행**: `python -m amv_gn_bridge.cli mcp` (또는 `amv-gn-bridge.exe mcp`)
-  - 제공 도구: `ask_gemini`, `generate_gemini_image`, `get_gemini_status`
-- **브라우저 확장프로그램**: Chrome / Edge / Whale `확장 프로그램 관리 → 개발자 모드 → 압축해제된 확장 프로그램 로드`에서 `extension/` 폴더(또는 릴리스의 `amv-gn-bridge-extension.zip`)를 로드합니다. (사이드바 단축키: `Ctrl+Shift+G`)
+| Command | Description |
+| :--- | :--- |
+| `amv-gn-bridge` | Launch native desktop GUI + embedded `:11501` gateway |
+| `amv-gn-bridge dashboard` | Start `:11501` gateway and open web dashboard in browser |
+| `amv-gn-bridge gateway --port 11501` | Run headless REST API gateway only |
+| `amv-gn-bridge mcp` (alias: `serve`) | Run FastMCP stdio server for IDE/agent clients |
+| `amv-gn-bridge status` | Print account pool and live `HH:MM:SS` cooldown summary |
+| `amv-gn-bridge ask "<prompt>"` | Send a one-shot query from the terminal |
+| `amv-gn-bridge purge` | Terminate idle Gemini browser process trees |
+| `amv-gn-bridge selftest` | Run built-in integrity check |
 
 ---
 
-## 단일 EXE 빌드 및 동적 자동 업데이트
+## FastMCP Integration (Claude Desktop, Cursor, Antigravity)
+
+Add the following entry to your MCP configuration (`claude_desktop_config.json`, Cursor MCP settings, or Antigravity `mcp_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "gemini-bridge": {
+      "command": "amv-gn-bridge",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+If using a specific Python environment instead of the EXE on `PATH`:
+
+```json
+{
+  "mcpServers": {
+    "gemini-bridge": {
+      "command": "python",
+      "args": ["-m", "amv_gn_bridge.cli", "mcp"]
+    }
+  }
+}
+```
+
+Exposed tools:
+- `ask_gemini(prompt, mode="auto")` (`"auto"` or `"thinking"`)
+- `generate_gemini_image(prompt, output_path, reference_images=None)`
+- `get_gemini_status()`
+
+---
+
+## Browser Sidebar Extension (Chrome / Edge / Whale)
+
+1. Download and unzip [`amv-gn-bridge-extension.zip`](https://github.com/uno-km/amv-gn-bridge/releases/latest/download/amv-gn-bridge-extension.zip) (or use the `extension/` folder unpacked by `setup_all.ps1` / repository checkout).
+2. Open `chrome://extensions`, `edge://extensions`, or `whale://extensions` and enable **Developer mode**.
+3. Click **Load unpacked** and select the `extension/` folder.
+4. Toggle the side panel with `Ctrl+Shift+G` (`Cmd+Shift+G` on macOS).
+
+---
+
+## Building the Windows Single-File EXE
 
 ```bash
 python scripts/build/build_exe.py
 ```
 
-- 빌드 시 `dist/amv-gn-bridge.exe`, `dist/amv-gn-bridge.exe.sha256`, `dist/build_report.json`이 생성되며 `selftest`를 자동으로 검증합니다.
-- 실행 중인 앱은 GitHub Releases에 새 버전이 게시되면 상단에 동적 업데이트 배너를 표시하고, 클릭 시 새 `.exe` 다운로드 → SHA-256 검증 → 원자적 핫스왑 교체 → 자동 재시작을 수행합니다.
+Generates `dist/amv-gn-bridge.exe`, `dist/amv-gn-bridge.exe.sha256`, and `dist/build_report.json` after validating the binary via `selftest`. Running EXE instances poll GitHub Releases every 30 minutes and support SHA-256 verified hot-swap updates with `.bak` rollback safety.
 
 ---
 
-## 라이선스
+## License
 
 Copyright © 2026 Eunho Kim / AMEVA Foundation.  
 SPDX-License-Identifier: `Apache-2.0 OR Commercial-License`

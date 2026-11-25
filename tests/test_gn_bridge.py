@@ -455,6 +455,14 @@ class TestGeminiBridgeCore(unittest.TestCase):
         mock_engine.query.assert_not_awaited()
         mock_engine.generate_image.assert_not_awaited()
 
+    def test_cli_purge_and_serve_alias_registered(self) -> None:
+        from amv_gn_bridge import cli
+
+        with patch.object(engine.GeminiPool, "purge_all", AsyncMock(return_value=2)):
+            with patch("sys.argv", ["amv-gn-bridge", "purge"]):
+                cli.main()
+        self.assertTrue(hasattr(cli, "cmd_purge"))
+
 
 if __name__ == "__main__":
     unittest.main()

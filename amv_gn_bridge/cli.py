@@ -94,6 +94,16 @@ def cmd_status(_args):
     print(eng.get_status_summary())
 
 
+def cmd_purge(_args):
+    try:
+        from .engine import GeminiEngine
+    except (ImportError, ValueError):
+        from amv_gn_bridge.engine import GeminiEngine
+    eng = GeminiEngine()
+    closed = asyncio.run(eng.purge_all())
+    print(f"[amv-gn-bridge] Purged {closed} idle browser process tree(s).")
+
+
 def cmd_ask(args):
     try:
         from .engine import GeminiEngine
@@ -101,7 +111,7 @@ def cmd_ask(args):
         from amv_gn_bridge.engine import GeminiEngine
     prompt = " ".join(args.prompt).strip()
     if not prompt:
-        print("사용법: amv-gn-bridge ask <프롬프트>")
+        print("Usage: amv-gn-bridge ask <prompt>")
         sys.exit(1)
     eng = GeminiEngine()
     print(asyncio.run(eng.query(prompt, source="cli")))
@@ -160,11 +170,14 @@ def main():
     p_dash.add_argument("--port", type=int, default=11501)
     p_dash.set_defaults(func=cmd_dashboard)
 
-    p_mcp = sub.add_parser("mcp", help="Run FastMCP stdio server")
+    p_mcp = sub.add_parser("mcp", aliases=["serve"], help="Run FastMCP stdio server")
     p_mcp.set_defaults(func=cmd_mcp)
 
     p_st = sub.add_parser("status", help="Show account pool and quota countdown status")
     p_st.set_defaults(func=cmd_status)
+
+    p_purge = sub.add_parser("purge", help="Terminate idle Gemini browser process trees")
+    p_purge.set_defaults(func=cmd_purge)
 
     p_ask = sub.add_parser("ask", help="One-shot text query")
     p_ask.add_argument("prompt", nargs="+")
