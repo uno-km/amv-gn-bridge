@@ -230,9 +230,9 @@ class TestGeminiBridgeCore(unittest.TestCase):
         self.assertIn("Start-Process -FilePath $target", script)
 
         fake_rel = updater.ReleaseInfo(
-            version="0.2.0",
+            version="99.0.0",
             notes="New features",
-            url="https://github.com/uno-km/amv-gn-bridge/releases/tag/v0.2.0",
+            url="https://github.com/uno-km/amv-gn-bridge/releases/tag/v99.0.0",
             exe_url="https://example.com/amv-gn-bridge.exe",
             sha256_url="https://example.com/amv-gn-bridge.exe.sha256",
             asset_size=1024,
@@ -246,7 +246,7 @@ class TestGeminiBridgeCore(unittest.TestCase):
             body = r.json()
             self.assertTrue(body["ok"])
             self.assertTrue(body["has_update"])
-            self.assertEqual(body["latest_version"], "0.2.0")
+            self.assertEqual(body["latest_version"], "99.0.0")
             self.assertEqual(body["release"]["exe_url"], "https://example.com/amv-gn-bridge.exe")
 
     def test_parallel_requests_dispatch_across_distinct_workers(self) -> None:

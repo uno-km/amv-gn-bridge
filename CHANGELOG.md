@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.0
+
+### Changed & Optimized
+- **Session Bloat Prevention & Single-Tab Enforcement**: `_sanitize_profile_exit_type()` now sets `session.restore_on_startup = 5` and `_prune_stale_session_files()` removes accumulated `Default/Sessions/Tabs_*` and `Session_*` files on launch while preserving authentication cookies and preferences. `connect()` trims extra browser tabs down to a single active page, and `verify_login()` reuses the cold-boot startup tab instead of spawning an extra tab.
+- **Fast Startup Failure Cleanup & Non-Blocking Teardown**: `ensure_running()` detects immediate child-process exits (e.g., Chromium singleton handoff) via `proc.poll()` and invokes `kill_browser_process(force=True)` before raising `RuntimeError`; `cleanup()` avoids blocking CDP `page.close()` / `context.close()` calls.
+- **Persistent Login Window (`open_login`)**: Opening a browser window for an already signed-in account now keeps the window open until closed by the user or timeout expiry (`hold_if_signed_in=True`) instead of auto-closing after 1 second.
+- **Image Creation Menu Retry**: Added up to 3 retry attempts (`Escape` reset + `10000ms` click timeout) around `"업로드 및 도구" -> "이미지 만들기"` selection in `generate_image()` to absorb transient UI overlay delays while preserving immediate `aria-disabled` `GeminiQuotaError` detection.
+- **Strict FIFO Queue & Accurate Queue/Active Metrics**: Added a FIFO ticket queue (`_wait_tickets`, `_ticket_seq`) to `GeminiPool._acquire_next_worker()` so excess concurrent requests wait in strict arrival order once all available accounts are busy, while preserving immediate parallel dispatch across idle accounts and immediate `GeminiAllQuotaExhausted` when all accounts are cooling down. Exposed `queued_count` / `queued_tasks` on `/api/status` and `/health`.
+- **MCP Double-Launch Guard & Extended Timeout**: `mcp_server.py` now falls back to direct local `engine` execution only on `ConnectionRefusedError` (preventing Edge profile double-launch collisions on gateway `HTTPError` or `TimeoutError`) and raises the default gateway timeout to `360s` (`GEMINI_MCP_TIMEOUT_SEC`).
+- **Async Gateway Status & Scalable GUI Verify Timeout**: Offloaded `engine.list_accounts()` via `asyncio.to_thread()` in `/health`, `/api/status`, and `/api/accounts`; scaled `_verify_all()` GUI request timeout dynamically with account count.
+
+### Verified
+- 15/15 unit tests passing (`pytest tests/ -v`), including session pruning/cookie preservation, extra-tab trimming, early-exit process cleanup, FIFO queue ordering with `active_count`/`queued_count` separation, and MCP double-launch guard.
+- Live multi-account verification confirmed single-tab launch (`page_tabs=1`), non-blocking `/api/status`, live `/api/accounts/{port}/verify`, FastMCP `stdio` handshake, and zero residual Edge processes after `/api/purge`.
+
 ## 0.1.3
 
 ### Fixed
